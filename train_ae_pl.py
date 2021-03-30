@@ -30,6 +30,8 @@ class AE(pl.LightningModule):
         # It is independent of forward
         x = batch[0]
         x_hat = self.network(x)
+        vis.images(x, nrow=8, win='x', opts=dict(title='x'))   #画输入
+        vis.images(x_hat, nrow=8, win='x_hat', opts=dict(title='x_hat'))   #画输入
         loss = self.loss_func(x_hat, x)
         self.log('train_loss', loss, on_step=True, on_epoch=True, prog_bar=True, logger=True)
         return loss
@@ -107,7 +109,7 @@ def train():
     mnist_test = DataLoader(mnist_test, batch_size = args.batch_size, shuffle = True)
   
 
-    #vis = visdom.Visdom()
+    
 
     # network
     autoencoder = AE()
@@ -118,4 +120,5 @@ def train():
     #vis.images(x_hat, nrow=8, win='x_hat', opts=dict(title='x_hat'))   #画输出
 
 if __name__ == "__main__":
+    vis = visdom.Visdom()
     train()

@@ -5,37 +5,37 @@ from torch.utils.data import DataLoader
 from torchvision import transforms, datasets
 import pytorch_lightning as pl
 
-
 from argparse import ArgumentParser
 import visdom
 
 # --------------------------------------------------------------------------------------
-class AE(pl.LightningModule):
+class VAE(pl.LightningModule):
 
     def __init__(self):
         super().__init__()
-        self.network = EncoderDecoder()
+        self.network = VariationalEncoderDecoder()
 
     def forward(self, x):
         """
             param         x [b, 1, 28, 28]  第2个 1 表示为 1个通道  b是batch
             return 
         """
-        x_hat = self.network(x)
+        x_hat, kld = self.network(x)
 
-        return x_hat
+        return x_hat, kld
 
     def training_step(self, batch, batch_idx):
         # training_step defined the train loop.
         # It is independent of forward
         x = batch[0]
-        x_hat = self.network(x)
-        loss = self.loss_func(x_hat, x)
+        x_hat, kdl = self.network(x)
+        loss = self.loss_func(x_hat, x, kdl)
         self.log('train_loss', loss, on_step=True, on_epoch=True, prog_bar=True, logger=True)
         return loss
 
-    def loss_func(self, x_hat, x):  
-        loss = F.mse_loss(x_hat, x)
+    def loss_func(self, x_hat, x, kld):  
+        elbo = - F.mse_loss(x_hat, x) - 1.0 * kld
+        loss = - elbo
         return loss
 
     def configure_optimizers(self):
@@ -43,9 +43,12 @@ class AE(pl.LightningModule):
         return optimizer
 
 # --------------------------------------------------------------------------------------
-class EncoderDecoder(nn.Module):
+class VariationalEncoderDecoder(nn.Module):
     def __init__(self):
         super().__init__()
+        # [b,784] => [b, 20]
+        # u: [b, 10]  相当于潜在向量为10维 每个潜在单元有独自的分布
+        # sigma: [b, 10]
         self.encoder = nn.Sequential(
             nn.Linear(784,256),
             nn.ReLU(),
@@ -54,9 +57,11 @@ class EncoderDecoder(nn.Module):
             nn.Linear(64,20),
             nn.ReLU(),
         )
-        # [b, 20] => [b, 764] 因为是二进制图像最后sigmoid归到【0，1】区间
+
+
+        # [b, 10] => [b, 764] 因为是二进制图像最后sigmoid归到[0, 1]区间 10是因为20有两个参数 20/2
         self.decoder = nn.Sequential(
-            nn.Linear(20,64),
+            nn.Linear(10,64),
             nn.ReLU(),
             nn.Linear(64,256),
             nn.ReLU(),
@@ -65,16 +70,35 @@ class EncoderDecoder(nn.Module):
         )
     
     def forward(self, x):
+        """
+            param         x [b, 1, 28, 28]  第2个 1 表示为 1个通道  b是batch
+            return 
+        """
         batch_size = x.size(0)
         # flatten 拉为1维
         x = x.view(batch_size, 784)
         # encoder
-        x = self.encoder(x)
-        # decoder
-        x = self.decoder(x)
-        # reshape
-        x = x.view(batch_size, 1, 28, 28)
-        return x
+        # [b, 20], including mean and sigma
+        h_ = self.encoder(x)
+
+        # [b, 20] =>> [b, 10] and [b, 10]
+        mu, sigma = h_.chunk(2, dim=1)
+        
+        # 重参数 epison~N(0, 1)
+        h = mu + sigma * torch.randn_like(sigma)
+
+        # decoder [b, 10] =>> [b, 784]
+        x_hat = self.decoder(h)
+        # reshape [b, 784] =>> [b, 28, 28]
+        x_hat = x_hat.view(batch_size, 1, 28, 28)
+
+        kld = 0.5 * torch.sum(
+            torch.pow(mu, 2) +
+            torch.pow(sigma, 2) - 
+            torch.log(1e-8 + torch.pow(sigma, 2)) - 1  # x接近于0时 log趋于负无穷 +1e-8使log内总是大于0 
+        ) / (batch_size * 28 * 28) # 因为MSE是pixel级别的 所以kld也应该是pixel级别的
+
+        return x_hat, kld
 
 # --------------------------------------------------------------------------------------
 def parse_arguments():
@@ -86,7 +110,6 @@ def parse_arguments():
     return parser.parse_args()
 
 
-# --------------------------------------------------------------------------------------
 def train():
     args = parse_arguments()
     trainer_config = {
@@ -107,10 +130,11 @@ def train():
     mnist_test = DataLoader(mnist_test, batch_size = args.batch_size, shuffle = True)
   
 
+
     #vis = visdom.Visdom()
 
     # network
-    autoencoder = AE()
+    autoencoder = VAE()
     trainer = pl.Trainer(**trainer_config)
     trainer.fit(autoencoder, mnist_train)
 
